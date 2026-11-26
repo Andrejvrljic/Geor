@@ -106,7 +106,11 @@ jobs:
           # warten, bis Cloudflare wirklich die neue Version ausliefert
           LIVE=""
           for i in $(seq 1 60); do
-            if curl -fs "$URL/api/health" | grep -q "\"version\":\"$GITHUB_SHA\""; then LIVE=1; echo "Neue Version ist live."; break; fi
+            # neue Worker-Version UND die frisch hochgeladenen Spieldateien müssen überall angekommen sein
+            if curl -fs "$URL/api/health" | grep -q "\"version\":\"$GITHUB_SHA\"" \
+              && curl -fso /dev/null "$URL/app.js" && curl -fso /dev/null "$URL/shared/game.js" && curl -fso /dev/null "$URL/style.css"; then
+              LIVE=1; echo "Neue Version ist live."; break
+            fi
             sleep 3
           done
           if [ -z "$LIVE" ]; then echo "::error::Die neue Version ist nach 3 Minuten noch nicht online."; exit 1; fi
