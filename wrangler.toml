@@ -1,0 +1,28 @@
+name = "kristallfabrik"
+main = "cloudflare/worker.js"
+compatibility_date = "2025-06-01"
+workers_dev = true
+
+# Die Spielseite (HTML, CSS, JavaScript)
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+# Live-Raum: ein Durable Object pro Raum-Code (Echtzeit über WebSocket)
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "RoomDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDO"]
+
+# Konten, Fortschritt, Rangliste. database_id setzt der GitHub-Actions-Workflow ein.
+[[d1_databases]]
+binding = "DB"
+database_name = "kristallfabrik-db"
+database_id = "__D1_DATABASE_ID__"
+
+# Der Lehrkraft-Code ist ein geheimes Secret (ADMIN_CODE). Er wird vom Workflow
+# aus dem GitHub-Repository-Secret ADMIN_CODE gesetzt – nie hier eintragen!

@@ -1,0 +1,14 @@
+{
+  "name": "kristallfabrik",
+  "version": "1.0.0",
+  "private": true,
+  "description": "KI-Lernlabor als Spiel: Knacke die Geheimcodes der Kristallfabrik – als Selberdenker, KI-Löser oder KI-Trainer",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/game.test.js",
+    "test:live": "node --test --test-force-exit test/live.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
