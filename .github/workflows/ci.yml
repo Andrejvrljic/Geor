@@ -1,0 +1,31 @@
+# Prüft jeden Pull Request: Spielregeln (Unit-Tests) und der komplette Server lokal
+# (Worker + Durable Object + D1 im Cloudflare-Simulator von wrangler) – ohne Zugangsdaten.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unit-Tests
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+      - name: Server lokal starten und Live-Test
+        run: |
+          npm install --no-save --no-audit --no-fund wrangler@4
+          printf 'ADMIN_CODE="ci-test-code"\n' > .dev.vars
+          npx wrangler dev --port 8787 --ip 127.0.0.1 --var VERSION:ci > wrangler.log 2>&1 &
+          for i in $(seq 1 60); do curl -fs http://127.0.0.1:8787/api/health && break; sleep 2; done
+          TEST_URL=http://127.0.0.1:8787 npm run test:live || { cat wrangler.log; exit 1; }
