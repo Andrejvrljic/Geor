@@ -99,55 +99,73 @@ test('Lehrkraft-Bereich ist geschützt', async () => {
   assert.equal(r.status, 403);
 });
 
-test('Multiplayer: Live-Raum erstellen, beitreten, starten, Fortschritt sehen', async () => {
-  const host = await signup(), kid = await signup();
-  assert.equal((await api('POST', '/api/room', {})).status, 401);
-  const room = await api('POST', '/api/room', {}, host.token);
-  assert.equal(room.status, 200);
-  const code = room.data.code;
-  assert.match(code, /^[A-Z2-9]{4}$/);
+test('Live-Raum: nur Lehrkräfte können Räume erstellen', async () => {
+  const kid = await signup();
+  assert.equal((await api('POST', '/api/room', {}, kid.token)).status, 403);
+  assert.equal((await api('POST', '/api/room', { code: 'sicher-falsch-' + rnd() }, kid.token)).status, 403);
+});
 
-  // ohne Anmeldung kein Zutritt
+const teacherCode = process.env.TEST_ADMIN_CODE || '';
+test('Multiplayer: Lehrkraft erstellt Raum, Kinder treten bei, Start und Fortschritt live', { skip: teacherCode ? false : 'TEST_ADMIN_CODE fehlt' }, async () => {
+  const kid = await signup(), kid2 = await signup();
+  const room = await api('POST', '/api/room', { code: teacherCode });
+  assert.equal(room.status, 200, JSON.stringify(room.data));
+  const { code, hostKey } = room.data;
+  assert.match(code, /^[A-Z2-9]{4}$/);
+  assert.ok(hostKey && hostKey.length >= 32);
+
+  // ohne Anmeldung kein Zutritt, falscher Spielleitungs-Schlüssel wird abgelehnt
   const anon = await socket(code);
   anon.send({ t: 'hello', token: 'kaputt' });
   assert.match((await anon.wait((m) => m.t === 'error')).msg, /melde dich an/);
   anon.close();
+  const fake = await socket(code);
+  fake.send({ t: 'hello', hostKey: 'f'.repeat(48) });
+  assert.match((await fake.wait((m) => m.t === 'error')).msg, /Lehrkraft/);
+  fake.close();
 
   const h = await socket(code);
-  h.send({ t: 'hello', token: host.token });
-  const w1 = await h.wait((m) => m.t === 'welcome');
-  assert.equal(w1.host, true);
+  h.send({ t: 'hello', hostKey });
+  assert.equal((await h.wait((m) => m.t === 'welcome')).host, true);
 
   const k = await socket(code);
   k.send({ t: 'hello', token: kid.token });
   assert.equal((await k.wait((m) => m.t === 'welcome')).host, false);
-  await h.wait((m) => m.t === 'room' && m.players.some((p) => p.name === kid.login));
+  const k2 = await socket(code);
+  k2.send({ t: 'hello', token: kid2.token });
+  await k2.wait((m) => m.t === 'welcome');
+  await h.wait((m) => m.t === 'room' && m.players.length === 2);
 
   k.send({ t: 'mode', mode: 'B' });
-  await h.wait((m) => m.t === 'room' && m.players.some((p) => p.name === kid.login && p.mode === 'B'));
+  k2.send({ t: 'mode', mode: 'C' });
+  await h.wait((m) => m.t === 'room' && m.players.some((p) => p.name === kid.login && p.mode === 'B') && m.players.some((p) => p.name === kid2.login && p.mode === 'C'));
 
+  // Kinder dürfen nicht starten, die Lehrkraft spielt nicht mit
   k.send({ t: 'start' });
   assert.match((await k.wait((m) => m.t === 'error')).msg, /Spielleitung/);
+  h.send({ t: 'mode', mode: 'A' });
+  assert.match((await h.wait((m) => m.t === 'error')).msg, /spielt nicht mit/);
 
   h.send({ t: 'start' });
-  const s1 = await h.wait((m) => m.t === 'start'), s2 = await k.wait((m) => m.t === 'start');
+  const s1 = await k.wait((m) => m.t === 'start'), s2 = await k2.wait((m) => m.t === 'start');
+  await h.wait((m) => m.t === 'start');
   assert.equal(s1.at, s2.at);
   await h.wait((m) => m.t === 'room' && m.phase === 'running');
 
   k.send({ t: 'progress', stage: 2 });
   await h.wait((m) => m.t === 'room' && m.players.some((p) => p.name === kid.login && p.stage === 2));
-  k.send({ t: 'progress', stage: 3, done: true, score: 930, stars: 3 });
-  const fin = await h.wait((m) => m.t === 'room' && m.players.some((p) => p.name === kid.login && p.done));
-  const me = fin.players.find((p) => p.name === kid.login);
-  assert.equal(me.score, 930);
-  assert.equal(fin.players[0].name, kid.login); // Fertige stehen oben
+  k2.send({ t: 'progress', stage: 3, done: true, score: 930, stars: 3 });
+  const fin = await h.wait((m) => m.t === 'room' && m.players.some((p) => p.name === kid2.login && p.done));
+  assert.equal(fin.players[0].name, kid2.login); // Fertige stehen oben
+  assert.equal(fin.players[0].score, 930);
+  assert.equal(fin.players.length, 2); // die Lehrkraft steht nicht in der Liste
 
   h.send({ t: 'reset' });
   await k.wait((m) => m.t === 'reset');
-  h.close(); k.close();
+  h.close(); k.close(); k2.close();
 
   const bad = await socket('ZZZZ');
-  bad.send({ t: 'hello', token: host.token });
+  bad.send({ t: 'hello', token: kid.token });
   assert.match((await bad.wait((m) => m.t === 'error')).msg, /gibt es nicht/);
   bad.close();
 });

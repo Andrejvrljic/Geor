@@ -159,9 +159,9 @@ async function renderHome() {
   code.addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
   main.append(h('div', { class: 'card' },
     h('h3', {}, '🏁 Live-Raum – mit der ganzen Klasse gleichzeitig'),
-    h('p', { class: 'muted', style: 'margin:0 0 10px' }, 'Eine Person erstellt einen Raum und sagt den Code. Alle sehen live, wer in welchem Level ist – und wer zuerst fertig ist.'),
-    h('div', { class: 'row' }, code, h('button', { class: 'btn', onclick: join }, 'Beitreten'),
-      h('span', { class: 'muted' }, 'oder'), h('button', { class: 'btn light', onclick: () => needAccount(createRoom) }, '➕ Raum erstellen'))));
+    h('p', { class: 'muted', style: 'margin:0 0 10px' }, 'Die Lehrkraft erstellt einen Raum und sagt den Code. Alle sehen live, wer in welchem Level ist – und wer zuerst fertig ist.'),
+    h('div', { class: 'row' }, code, h('button', { class: 'btn', onclick: join }, 'Beitreten')),
+    h('div', { style: 'margin-top:10px' }, h('button', { class: 'linkBtn', style: 'padding-left:0', onclick: teacherRoomModal }, '👩‍🏫 Raum erstellen (nur für Lehrkräfte)'))));
   main.append(h('div', { class: 'row center' },
     h('button', { class: 'btn gold', onclick: () => renderLeaderboard('A') }, '🏆 Rangliste')));
   main.append(h('div', { class: 'footer' }, h('button', { class: 'linkBtn', onclick: renderTeacher }, '👩‍🏫 Lehrkraft-Ansicht')));
@@ -576,7 +576,11 @@ class RoomClient {
   connect() {
     const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?room=${this.code}`);
     this.ws = ws;
-    ws.onopen = () => { this.tries = 0; ws.send(JSON.stringify({ t: 'hello', token: S.auth && S.auth.token })); };
+    ws.onopen = () => {
+      this.tries = 0;
+      const hostKey = hostKeyFor(this.code);
+      ws.send(JSON.stringify(hostKey ? { t: 'hello', hostKey } : { t: 'hello', token: S.auth && S.auth.token }));
+    };
     ws.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch { return; } this.onMsg(m); };
     ws.onclose = () => {
       if (this.closed) return;
@@ -587,7 +591,7 @@ class RoomClient {
   send(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); }
   close() { this.closed = true; clearInterval(this.pinger); try { this.ws.close(); } catch { /* egal */ } }
   onMsg(m) {
-    if (m.t === 'welcome') { this.you = m.you; this.host = m.host; sess.set('kf_room', this.code); if (this.mode) this.send({ t: 'mode', mode: this.mode }); return; }
+    if (m.t === 'welcome') { this.you = m.you; this.host = m.host; sess.set('kf_room', this.code); if (this.mode && !this.host) this.send({ t: 'mode', mode: this.mode }); return; }
     if (m.t === 'error') { toast('⚠️ ' + m.msg); if (m.fatal) { leaveRoom(); if (!S.game) renderHome(); } return; }
     if (m.t === 'room') { this.state = m; onRoomUpdate(); return; }
     if (m.t === 'start') return onRoomStart(m.at);
@@ -595,13 +599,36 @@ class RoomClient {
   }
   me() { return this.state && this.state.players.find((p) => p.id === this.you); }
 }
-async function createRoom() {
-  const r = await api('POST', '/api/room');
-  if (r.status !== 200) return toast(r.data.error || 'Raum konnte nicht erstellt werden.');
-  enterRoom(r.data.code);
+// Nur Lehrkräfte dürfen Räume erstellen: Der Server prüft den Lehrkraft-Code und gibt einen
+// geheimen Spielleitungs-Schlüssel zurück, der nur in diesem Browser-Tab gespeichert wird.
+async function createRoom(teacherCode) {
+  const r = await api('POST', '/api/room', { code: teacherCode });
+  if (r.status !== 200) return { error: r.data.error || 'Raum konnte nicht erstellt werden.' };
+  sess.set('kf_admin', teacherCode);
+  leaveRoom();
+  sess.set('kf_host', JSON.stringify({ room: r.data.code, key: r.data.hostKey }));
+  S.room = new RoomClient(r.data.code); renderRoom();
+  return {};
 }
+function teacherRoomModal() {
+  modal((b, close) => {
+    const inp = h('input', { class: 'field', type: 'password', placeholder: 'Lehrkraft-Code', autocomplete: 'off', value: sess.get('kf_admin') || '' });
+    const err = h('div', { class: 'errNote hidden', role: 'alert' });
+    const go = h('button', { class: 'btn', type: 'submit' }, '➕ Raum erstellen');
+    b.append(h('h2', {}, '👩‍🏫 Live-Raum erstellen'),
+      h('p', { class: 'muted' }, 'Nur Lehrkräfte können Räume erstellen. Sie leiten den Raum, spielen aber nicht mit.'),
+      h('form', { onsubmit: async (e) => {
+        e.preventDefault(); go.disabled = true;
+        const r = await createRoom(inp.value.trim());
+        go.disabled = false;
+        if (r.error) { err.textContent = r.error; err.classList.remove('hidden'); return; }
+        close();
+      } }, inp, err, h('div', { class: 'row end', style: 'margin-top:12px' }, h('button', { class: 'btn light', type: 'button', onclick: close }, 'Abbrechen'), go)));
+  });
+}
+const hostKeyFor = (code) => { try { const x = JSON.parse(sess.get('kf_host') || 'null'); return x && x.room === code ? x.key : null; } catch { return null; } };
 function enterRoom(code) { leaveRoom(); S.room = new RoomClient(code); renderRoom(); }
-function leaveRoom() { if (S.room) S.room.close(); S.room = null; sess.set('kf_room', null); }
+function leaveRoom() { if (S.room) S.room.close(); S.room = null; sess.set('kf_room', null); sess.set('kf_host', null); }
 function sendProgress(extra = {}) {
   if (!S.room || !S.game || !S.game.room) return;
   S.room.send({ t: 'progress', stage: S.game.stage, ...extra });
@@ -636,7 +663,7 @@ function modePicker(onPick, current = '') {
     onclick: () => onPick(m.key),
   }, `${m.icon} ${m.key} · ${m.name.replace('Die ', '')}`)));
 }
-const stageText = (p, phase) => p.done ? null : p.host && !p.mode ? 'Spielleitung' : phase === 'running' && p.stage > 0 ? `Level ${p.stage} von 3` : p.mode ? 'bereit' : 'wählt Gruppe …';
+const stageText = (p, phase) => p.done ? null : phase === 'running' && p.stage > 0 ? `Level ${p.stage} von 3` : p.mode ? 'bereit' : 'wählt Gruppe …';
 
 function liveStrip() {
   const R = S.room, st = R && R.state;
@@ -655,10 +682,10 @@ function renderRoom() {
   const st = R.state;
   main.append(h('div', { class: 'card hero' },
     h('div', { class: 'muted', style: 'font-weight:800' }, 'Raum-Code'), h('div', { class: 'roomCode' }, R.code),
-    h('p', { class: 'muted', style: 'margin:4px 0 0' }, R.host ? 'Du bist die Spielleitung 👑. Sag allen diesen Code – sie geben ihn auf der Startseite ein.' : 'Du bist im Raum. Wähle deine Gruppe und warte auf den Start.')));
+    h('p', { class: 'muted', style: 'margin:4px 0 0' }, R.host ? 'Sie sind die Spielleitung 👑. Sagen Sie allen diesen Code – die Kinder geben ihn auf der Startseite ein.' : 'Du bist im Raum. Wähle deine Gruppe und warte auf den Start.')));
   if (!st) { main.append(h('div', { class: 'card' }, h('p', { class: 'muted' }, 'Verbinde …'))); return; }
   const me = R.me();
-  main.append(h('div', { class: 'card' }, h('h3', {}, '🎯 Deine Gruppe'),
+  if (!R.host) main.append(h('div', { class: 'card' }, h('h3', {}, '🎯 Deine Gruppe'),
     modePicker((k) => { R.setMode(k); renderRoom(); }, R.mode),
     R.mode ? h('div', { class: 'mis mission', style: 'margin-top:10px', html: '<b>Deine Mission:</b> ' + MODES[R.mode].mission }) : h('p', { class: 'muted' }, 'Tippe auf eine Gruppe.'),
     st.phase === 'running' && R.mode && (!me || !me.done) ? h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'btn green big', onclick: () => startGame(R.mode, R.code) }, '▶ Das Spiel läuft – los geht’s!')) : null,
@@ -671,16 +698,17 @@ function renderRoom() {
       h('p', { class: 'muted small', style: 'margin:8px 0 0' }, 'Nach dem Start zählt ein Countdown 3-2-1, dann beginnen alle gleichzeitig.')));
   }
   main.append(h('div', { class: 'card' }, h('h3', {}, `👥 Im Raum (${st.players.length})`),
+    st.players.length ? null : h('p', { class: 'muted' }, 'Noch niemand da. Die Kinder geben den Code auf der Startseite ein.'),
     h('div', { class: 'tblWrap' }, h('table', { class: 'tbl' },
       h('tr', {}, h('th', {}, ''), h('th', {}, 'Spitzname'), h('th', {}, 'Gruppe'), h('th', {}, 'Stand')),
       st.players.map((p) => h('tr', { class: p.id === R.you ? 'me' : '' },
         h('td', {}, h('span', { class: 'dot' + (p.online ? '' : ' off'), title: p.online ? 'online' : 'offline' })),
-        h('td', {}, (p.host ? '👑 ' : '') + p.name),
+        h('td', {}, p.name),
         h('td', {}, p.mode ? `${MODES[p.mode].icon} ${p.mode}` : '–'),
         h('td', {}, p.done ? h('span', {}, '✔ ', h('b', {}, String(p.score)), ' ', starsEl(p.stars)) : stageText(p, st.phase))))))));
   main.append(h('div', { class: 'row center' },
     h('button', { class: 'btn light', onclick: () => renderLeaderboard(R.mode || 'A') }, '🏆 Rangliste'),
-    h('button', { class: 'btn light', onclick: () => { leaveRoom(); renderHome(); } }, '🚪 Raum verlassen')));
+    h('button', { class: 'btn light', onclick: () => (R.host ? confirmBox('Raum verlassen?', 'Sie können den Raum danach nicht mehr leiten. Die Kinder bleiben im Raum, aber niemand kann mehr starten.', 'Verlassen', () => { leaveRoom(); renderHome(); }, 'Bleiben') : (leaveRoom(), renderHome())) }, '🚪 Raum verlassen')));
 }
 
 /* ---------- Lehrkraft-Ansicht ---------- */
@@ -695,6 +723,9 @@ function renderTeacher() {
     out.innerHTML = '';
     if (r.status !== 200) return out.append(h('div', { class: 'errNote' }, r.data.error || 'Fehler.'));
     sess.set('kf_admin', code.value);
+    out.append(h('div', { class: 'card' }, h('h3', {}, '🏁 Live-Raum'),
+      h('p', { class: 'muted', style: 'margin:0 0 10px' }, 'Erstellen Sie einen Raum für Ihre Klasse. Alle spielen gleichzeitig, Sie sehen live den Stand.'),
+      h('button', { class: 'btn green', onclick: async () => { const x = await createRoom(code.value.trim()); if (x.error) toast(x.error); } }, '➕ Live-Raum erstellen')));
     showResults(out, r.data.runs);
   };
   code.addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
@@ -736,5 +767,5 @@ function showResults(out, runs) {
 /* ---------- Start ---------- */
 (function boot() {
   const room = sess.get('kf_room');
-  if (room && S.auth) { S.room = new RoomClient(room); renderRoom(); } else renderHome();
+  if (room && (S.auth || hostKeyFor(room))) { S.room = new RoomClient(room); renderRoom(); } else renderHome();
 })();

@@ -2,7 +2,7 @@
 //   Worker        – liefert die Spielseite aus und beantwortet die API
 //   Durable Object – Live-Raum (Multiplayer) über WebSocket
 //   D1            – Konten, Fortschritt, Rangliste
-import { Store, sameText } from './db.js';
+import { Store, sameText, sha } from './db.js';
 import { computeScore, MODES } from '../public/shared/game.js';
 
 const json = (status, data) => new Response(JSON.stringify(data), {
@@ -18,6 +18,7 @@ const SECURITY = {
 const ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const ROOM_TTL = 4 * 3600 * 1000;
 const isRoomCode = (c) => typeof c === 'string' && /^[A-HJ-NP-Z2-9]{4}$/.test(c);
+const randomKey = () => [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, '0')).join('');
 const newRoomCode = () => [...crypto.getRandomValues(new Uint8Array(4))].map((b) => ROOM_CHARS[b % ROOM_CHARS.length]).join('');
 
 // kleine Bremse gegen Passwort-Raten (pro Worker-Instanz)
@@ -108,23 +109,29 @@ async function api(request, env, url) {
     if (!MODES[mode]) return json(400, { error: 'Unbekannte Gruppe.' });
     return json(200, { mode, top: await db.leaderboard(mode) });
   }
+  // Lehrkraft-Code prüfen (für Auswertung und zum Erstellen von Live-Räumen)
+  const teacherError = () => {
+    if (!env.ADMIN_CODE) return json(403, { error: 'Der Lehrkraft-Bereich ist gesperrt (Secret ADMIN_CODE fehlt).' });
+    const key = 'a' + ip;
+    if (tooMany(key)) return json(429, { error: 'Zu viele Fehlversuche. Warte 10 Minuten.' });
+    if (typeof body.code !== 'string' || !sameText(body.code.trim(), env.ADMIN_CODE)) { noteFail(key); return json(403, { error: 'Falscher Lehrkraft-Code.' }); }
+    return null;
+  };
   if (path === '/api/room' && request.method === 'POST') {
-    const a = await me();
-    if (!a) return json(401, { error: 'Bitte melde dich an.' });
+    // Nur Lehrkräfte dürfen Räume erstellen. Sie bekommen einen geheimen Spielleitungs-Schlüssel.
+    const err = teacherError(); if (err) return err;
+    const hostKey = randomKey();
     for (let i = 0; i < 8; i++) {
       const code = newRoomCode();
       const res = await env.ROOM.get(env.ROOM.idFromName(code)).fetch('https://room/init', {
-        method: 'POST', body: JSON.stringify({ code, host: a.id }),
+        method: 'POST', body: JSON.stringify({ code, hostKeyHash: await sha(hostKey) }),
       });
-      if (res.status === 200) return json(200, { code });
+      if (res.status === 200) return json(200, { code, hostKey });
     }
     return json(503, { error: 'Kein freier Raum gefunden. Versuch es nochmal.' });
   }
   if (path === '/api/admin/results' && request.method === 'POST') {
-    if (!env.ADMIN_CODE) return json(403, { error: 'Der Lehrkraft-Bereich ist gesperrt (Secret ADMIN_CODE fehlt).' });
-    const key = 'a' + ip;
-    if (tooMany(key)) return json(429, { error: 'Zu viele Fehlversuche. Warte 10 Minuten.' });
-    if (typeof body.code !== 'string' || !sameText(body.code.trim(), env.ADMIN_CODE)) { noteFail(key); return json(403, { error: 'Falscher Code.' }); }
+    const err = teacherError(); if (err) return err;
     return json(200, { runs: await db.allRuns() });
   }
   return json(404, { error: 'Nicht gefunden.' });
@@ -154,7 +161,8 @@ export class RoomDO {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.meta = null;            // { code, host, created }
+    this.meta = null;            // { code, hostKeyHash, created }
+    this.hosts = new Set();      // Verbindungen der Spielleitung (Lehrkraft, spielt nicht mit)
     this.phase = 'lobby';        // lobby | running
     this.startAt = 0;
     this.players = new Map();    // accountId -> { id, name, mode, stage, score, stars, done, conns:Set }
@@ -169,8 +177,8 @@ export class RoomDO {
     if (url.pathname === '/init' && request.method === 'POST') {
       if (this.alive()) return new Response('besetzt', { status: 409 });
       const b = await request.json();
-      this.meta = { code: b.code, host: b.host, created: Date.now() };
-      this.phase = 'lobby'; this.startAt = 0; this.players.clear();
+      this.meta = { code: b.code, hostKeyHash: b.hostKeyHash, created: Date.now() };
+      this.phase = 'lobby'; this.startAt = 0; this.players.clear(); this.hosts.clear();
       await this.state.storage.put('meta', this.meta);
       return new Response('ok');
     }
@@ -189,7 +197,8 @@ export class RoomDO {
     });
     const bye = () => {
       if (conn.player) { conn.player.conns.delete(conn); this.broadcastSoon(); }
-      conn.player = null;
+      if (conn.host) { this.hosts.delete(conn); this.broadcastSoon(); }
+      conn.player = null; conn.host = false;
     };
     server.addEventListener('close', bye);
     server.addEventListener('error', bye);
@@ -202,6 +211,15 @@ export class RoomDO {
     if (m.t === 'ping') return send({ t: 'pong' });
     if (m.t === 'hello') {
       if (!this.alive()) return send({ t: 'error', msg: 'Diesen Raum gibt es nicht (mehr). Prüfe den Code.', fatal: true });
+      if (m.hostKey !== undefined) {
+        if (typeof m.hostKey !== 'string' || !this.meta.hostKeyHash || !sameText(await sha(m.hostKey), this.meta.hostKeyHash)) {
+          return send({ t: 'error', msg: 'Nur die Lehrkraft, die den Raum erstellt hat, kann ihn leiten.', fatal: true });
+        }
+        if (conn.player) { conn.player.conns.delete(conn); conn.player = null; }
+        conn.host = true; this.hosts.add(conn);
+        send({ t: 'welcome', you: 0, host: true, code: this.meta.code });
+        return this.broadcast();
+      }
       const acc = await new Store(this.env.DB).byToken(m.token);
       if (!acc) return send({ t: 'error', msg: 'Bitte melde dich an, bevor du einem Raum beitrittst.', fatal: true });
       let p = this.players.get(acc.id);
@@ -210,14 +228,23 @@ export class RoomDO {
         p = { id: acc.id, name: acc.login, mode: '', stage: 0, score: 0, stars: 0, done: false, conns: new Set() };
         this.players.set(acc.id, p);
       }
+      if (conn.host) { this.hosts.delete(conn); conn.host = false; }
       if (conn.player && conn.player !== p) conn.player.conns.delete(conn);
       conn.player = p; p.conns.add(conn);
-      send({ t: 'welcome', you: p.id, host: p.id === this.meta.host, code: this.meta.code });
+      send({ t: 'welcome', you: p.id, host: false, code: this.meta.code });
+      return this.broadcast();
+    }
+    // Spielleitung (Lehrkraft): starten und zurücksetzen
+    if (m.t === 'start' || m.t === 'reset') {
+      if (!conn.host) return send({ t: 'error', msg: m.t === 'start' ? 'Nur die Spielleitung kann starten.' : 'Nur die Spielleitung kann zurücksetzen.' });
+      this.phase = m.t === 'start' ? 'running' : 'lobby';
+      this.startAt = m.t === 'start' ? Date.now() + 3000 : 0;
+      for (const q of this.players.values()) { q.stage = 0; q.score = 0; q.stars = 0; q.done = false; }
+      this.sendAll(m.t === 'start' ? { t: 'start', at: this.startAt } : { t: 'reset' });
       return this.broadcast();
     }
     const p = conn.player;
-    if (!p) return send({ t: 'error', msg: 'Erst „hello“ senden.' });
-    const isHost = p.id === this.meta.host;
+    if (!p) return send({ t: 'error', msg: conn.host ? 'Die Spielleitung spielt nicht mit.' : 'Erst „hello“ senden.' });
     if (m.t === 'mode') {
       if (!MODES[m.mode]) return;
       if (p.stage > 0 && !p.done) return send({ t: 'error', msg: 'Während des Spiels kannst du die Gruppe nicht wechseln.' });
@@ -229,32 +256,20 @@ export class RoomDO {
       if (m.done) { p.done = true; p.stage = 4; p.score = num(m.score, 2000); p.stars = num(m.stars, 3); }
       return this.broadcastSoon();
     }
-    if (m.t === 'start') {
-      if (!isHost) return send({ t: 'error', msg: 'Nur die Spielleitung kann starten.' });
-      this.phase = 'running'; this.startAt = Date.now() + 3000;
-      for (const q of this.players.values()) { q.stage = 0; q.score = 0; q.stars = 0; q.done = false; }
-      this.sendAll({ t: 'start', at: this.startAt });
-      return this.broadcast();
-    }
-    if (m.t === 'reset') {
-      if (!isHost) return send({ t: 'error', msg: 'Nur die Spielleitung kann zurücksetzen.' });
-      this.phase = 'lobby'; this.startAt = 0;
-      for (const q of this.players.values()) { q.stage = 0; q.score = 0; q.stars = 0; q.done = false; }
-      this.sendAll({ t: 'reset' });
-      return this.broadcast();
-    }
   }
 
   snapshot() {
     const players = [...this.players.values()]
       .filter((p) => p.conns.size || p.mode)
-      .map((p) => ({ id: p.id, name: p.name, mode: p.mode, stage: p.stage, score: p.score, stars: p.stars, done: p.done, online: p.conns.size > 0, host: p.id === this.meta.host }))
+      .map((p) => ({ id: p.id, name: p.name, mode: p.mode, stage: p.stage, score: p.score, stars: p.stars, done: p.done, online: p.conns.size > 0 }))
       .sort((a, b) => (b.done - a.done) || (b.score - a.score) || (b.stage - a.stage) || a.name.localeCompare(b.name));
-    return { t: 'room', code: this.meta.code, phase: this.phase, startAt: this.startAt, players };
+    return { t: 'room', code: this.meta.code, phase: this.phase, startAt: this.startAt, hostOnline: this.hosts.size > 0, players };
   }
   sendAll(m) {
     const s = JSON.stringify(m);
-    for (const p of this.players.values()) for (const c of p.conns) { try { c.ws.send(s); } catch { /* weg */ } }
+    const all = [...this.hosts];
+    for (const p of this.players.values()) all.push(...p.conns);
+    for (const c of all) { try { c.ws.send(s); } catch { /* weg */ } }
   }
   broadcast() { clearTimeout(this.timer); this.timer = 0; if (this.meta) this.sendAll(this.snapshot()); }
   broadcastSoon() { if (!this.timer) this.timer = setTimeout(() => this.broadcast(), 150); }
