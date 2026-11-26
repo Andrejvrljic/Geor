@@ -28,4 +28,4 @@ jobs:
           printf 'ADMIN_CODE="ci-test-code"\n' > .dev.vars
           npx wrangler dev --port 8787 --ip 127.0.0.1 --var VERSION:ci > wrangler.log 2>&1 &
           for i in $(seq 1 60); do curl -fs http://127.0.0.1:8787/api/health && break; sleep 2; done
-          TEST_URL=http://127.0.0.1:8787 npm run test:live || { cat wrangler.log; exit 1; }
+          TEST_URL=http://127.0.0.1:8787 TEST_ADMIN_CODE=ci-test-code npm run test:live || { cat wrangler.log; exit 1; }

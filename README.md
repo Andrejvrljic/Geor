@@ -13,6 +13,7 @@ Die „KI“ im Spiel ist fest programmiert. Es werden keine Daten an einen KI-D
 
 **Drei Levels:** 1 · Code knacken (Code-Schloss) → 2 · Denkweg (Schritt-Karten ordnen, mit Falle) → 3 · Kristall-Packung (5 Kristalle = 27).
 Dazu gibt es Punkte, Sterne, Zeitbonus, Konten (nur Spitzname), eine Rangliste pro Gruppe und einen **Live-Raum** für die ganze Klasse.
+Live-Räume können **nur Lehrkräfte** erstellen (mit dem Lehrkraft-Code). Sie leiten den Raum, spielen aber nicht mit. Kinder treten mit dem Raum-Code bei.
 Die **Lehrkraft-Ansicht** vergleicht die drei Gruppen und bietet einen CSV-Export.
 
 ## Online
@@ -32,7 +33,7 @@ Bei Pull Requests läuft `.github/workflows/ci.yml` mit dem kompletten Server lo
 | Secret | Pflicht | Wofür |
 |---|---|---|
 | `CLOUDFLARE_API_TOKEN` | ja | derselbe Token wie bei ECLIPSE/Brawl (Workers Scripts: Edit, D1: Edit) |
-| `ADMIN_CODE` | empfohlen | Code für die Lehrkraft-Ansicht. Ohne ihn bleibt sie gesperrt. |
+| `ADMIN_CODE` | empfohlen | Lehrkraft-Code: für die Auswertung und zum Erstellen von Live-Räumen. Ohne ihn sind beide gesperrt. Ein neuer Code gilt erst nach der nächsten Veröffentlichung. |
 | `CLOUDFLARE_ACCOUNT_ID` | nein | wird sonst automatisch ermittelt |
 
 ## Lokal

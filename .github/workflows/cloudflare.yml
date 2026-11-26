@@ -102,6 +102,8 @@ jobs:
           printf '%s' "$ADMIN_CODE" | npx wrangler secret put ADMIN_CODE
 
       - name: Live-Test (Seite, Datenbank, Multiplayer)
+        env:
+          TEST_ADMIN_CODE: ${{ secrets.ADMIN_CODE }}
         run: |
           # warten, bis Cloudflare wirklich die neue Version ausliefert
           LIVE=""
